@@ -9,6 +9,13 @@
         <ul class="contact-list">
           <li>{{ site.title }}</li>
           <li><a href="mailto:{{ site.email }}">{{ site.email }}</a></li>
+          {% if site.stackoverflow_id %}
+          <li>
+            <br />
+            <a href="http://stackoverflow.com/users/{{ site.stackoverflow_id }}/{{ site.stackoverflow_username }}"> <img src="http://stackoverflow.com/users/flair/{{ site.stackoverflow_id }}.png" width="208" height="58" alt="profile for {{ site.stackoverflow_username }} at Stack Overflow, Q&amp;A for professional and enthusiast programmers" title="profile for esm at Stack Overflow, Q&amp;A for professional and enthusiast programmers">
+            </a>
+          </li>
+          {% endif %}
         </ul>
       </div>
 
