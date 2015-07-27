@@ -27,7 +27,8 @@ $content-width:    800px;
 $on-palm:          600px;
 $on-laptop:        800px;
 
-
+#tagcloud { font-size:.9em;  }
+.tags li { display:inline; padding:0 4px; background:#EEE;}
 
 // Using media queries with like this:
 // @include media-query($on-palm) {
