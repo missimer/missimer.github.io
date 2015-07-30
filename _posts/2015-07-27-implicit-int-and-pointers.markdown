@@ -210,7 +210,7 @@ all 0's or all 1's depending on the value of bit 31.
 So what have we learned.  Well, the obvious is don't ignore warnings, but also
 that something so simple as a C function return value can work sometimes
 fail other times when you ignore them.  The code for this post can be found
-[here](/code/implicit-int-and-pointers.tar.gz).
+[here](https://github.com/missimer/implicit-int-and-pointers).
 
 #Setting %eax to 0 before the function call
 
