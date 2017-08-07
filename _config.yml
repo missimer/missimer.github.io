@@ -10,7 +10,6 @@ url: "http://ringzeroandlower.com" # the base hostname & protocol for your site
 github_username: missimer
 stackoverflow_id: 1607832
 stackoverflow_username: missimer
-so_careers_username: missimer
 
 # Build settings
 markdown: kramdown
