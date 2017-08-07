@@ -1,0 +1,497 @@
+---
+layout: post
+title:  "Booting from Grub2 to x86 long mode (64-bit mode)"
+tags: kernel x86-64 grub2 multiboot
+---
+
+In this post, I'm going to walk through the process of booting a kernel from grub
+and getting it up into 64 bit C code.  The kernel will be loaded to low physical
+memory by grub and will be mapped to high virtual memory.  This will leave the low
+virtual memory for user space.  This is similar to a Linux memory layout but we
+are only going to use the top two GB for the kernel.  Before we dive into
+the assembly it's probably best to start with the linker script.
+
+# Linker Script and Memory Layout
+
+Below is the linker script used for the kernel.
+
+**kernel.ld:**
+~~~~~~~~~~~~~~~~~~~~~
+ENTRY(_start)
+
+SECTIONS
+{
+  . = 4M;
+  _kernel_physical_start = .;
+
+  .boottext :
+    {
+      boot.o (.multiboot)
+      boot.o (.text)
+    }
+  .bootrodata :
+    {
+      boot.o (.rodata)
+    }
+  .bootdata :
+    {
+      boot.o (.data)
+    }
+  .bootbss :
+    {
+      boot.o (.bss)
+      boot.o (COMMON)
+    }
+
+  . = ALIGN(0x1000);
+  _boot_end = .;
+
+  . += 0xFFFFFFFF80000000;
+  _kernel_virtual_start = .;
+  .text : AT(_boot_end)
+  {
+    *(.multiboot)
+    *(.text)
+  }
+
+  . = ALIGN(0x1000);
+
+  .rodata : AT ( (LOADADDR (.text) + SIZEOF (.text) + 0xFFF) & 0xFFFFFFFFFFFFF000 )
+  {
+    *(.rodata)
+  }
+
+  . = ALIGN(0x1000);
+
+  .data : AT ( (LOADADDR (.rodata) + SIZEOF (.rodata) + 0xFFF) & 0xFFFFFFFFFFFFF000 )
+  {
+    *(.data)
+  }
+
+  . = ALIGN(0x1000);
+
+  .bss : AT ( (LOADADDR (.data) + SIZEOF (.data) + 0xFFF) & 0xFFFFFFFFFFFFF000 )
+  {
+    *(COMMON)
+    *(.bss)
+  }
+
+  . = ALIGN(0x1000);
+  .eh_frame (NOLOAD) : { *(.eh_frame) } : NONE
+
+  _kernel_virtual_end = .;
+
+  _kernel_physical_end = (LOADADDR (.eh_frame) + SIZEOF (.eh_frame) + 0xFFF) & 0xFFFFFFFFFFFFF000;
+}
+~~~~~~~~~~~~~~~~~~~~~
+
+So a couple things are going on in this linker script.  First `.` which is the
+current output location is set to four megabytes along with one variable
+`_kernel_physical_start` defined as well.  Then the rest of `boot.o` is layed
+out.  One thing to note is that `.boottext` contains `.multiboot` which we will
+talk about more in a bit.  After all the sections for `boot.o` are specified the
+current output location is offset by 0xFFFFFFFF80000000.  This is the start of
+the high virtual address space and it gives our kernel 2 GB.  If you need more
+for your kernel you can decrease this number.  Each section for the rest of the
+object files is set at the location previous section plus the size of previous
+rounded up to 0x1000.  The `.eh_frame` isn't needed so `NOLOAD` is specified
+for that section.  Finally, `_kernel_virtual_end` and `_kernel_physical_end` are
+defined.  The main take away from this linker script is that `boot.o` is
+identity mapped to low memory and everything else is loaded into low memory but
+has a high virtual address.  Now that the memory layout for our little kernel is
+set up we can move onto the code.
+
+`boot.S` is a bit of assembly that is going to get us into long mode and into C.
+The fact that we are jumping into C code isn't that relevant and we could easily
+jump into something like C++ or Rust.  It is responsible for two main things: 1)
+setting up the 64-bit paging data structures and 2) setting the CPU state for
+long mode.  It is also where the multiboot header is defined.  The `boot.S` seen
+below has a lot of C macros, hence it's `boot.S` instead of `boot.s` the capital
+S means the C preprocessor will be run first.  I mention this because it has a
+lot of macros to make it readable, self-documenting and to remove a bunch of
+magic numbers.  I'll put the output of the C preprocessor at the end of this
+post if you just need something quick and dirty that is also self-contained.
+
+# Assembly Code
+
+**boot.S:**
+~~~~~~~~~~~~~~~~~~~~~
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/mmu.h"
+#include "kernel.h"
+#include "sizes.h"
+#include "multiboot2.h"
+#include "arch/x86_64/msr.h"
+
+.SET HEADER_LENGTH, header_end - header_start
+.SET CHECKSUM, -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LENGTH)
+.section .multiboot
+header_start:
+    .long MULTIBOOT2_HEADER_MAGIC
+    .long MULTIBOOT_ARCHITECTURE_I386
+    .long HEADER_LENGTH
+    .long CHECKSUM
+
+    // multiboot tags go here
+
+    .short MULTIBOOT_HEADER_TAG_END
+    .short 0    // flags, none set
+    .long 8     // size, including itself (short + short + long)
+header_end:
+
+.code32
+
+.section .bss
+.comm pml4, PML4_SIZE, PML4_ALIGNMENT
+.comm low_pdpt, PDPT_SIZE, PDPT_ALIGNMENT
+.comm high_pdpt, PDPT_SIZE, PDPT_ALIGNMENT
+.comm low_page_directory_table, PAGE_DIRECTORY_SIZE, PAGE_DIRECTORY_ALIGNMENT
+.comm high_page_directory_table, PAGE_DIRECTORY_SIZE, PAGE_DIRECTORY_ALIGNMENT
+.comm tmp_stack, KERNEL_BOOT_STACK_SIZE, KERNEL_BOOT_STACK_ALIGNMENT
+
+.data
+.align GDT_TABLE_ALIGNMENT
+gdt_table:
+        .8byte GDT_FIRST_ENTRY
+        .8byte GDT_KERNEL_ENTRY
+
+gdt_table_end:
+        .skip (GDT_TABLE_SIZE - (gdt_table_end - gdt_table))
+
+gdt_ptr:
+         .short GDT_TABLE_SIZE - 1
+         .long gdt_table
+
+
+.section .text
+.global _start
+.type _start, @function
+_start:
+        movl $tmp_stack + KERNEL_BOOT_STACK_SIZE, %esp
+
+        movl $low_pdpt, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, pml4 + (PML4_ADDR_TO_ENTRY_INDEX(KERNEL_PHYSICAL_START) * PML4_ENTRY_SIZE)
+
+        movl $high_pdpt, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, pml4 + (PML4_ADDR_TO_ENTRY_INDEX(KERNEL_VIRTUAL_START) * PML4_ENTRY_SIZE)
+
+        movl $low_page_directory_table, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, low_pdpt + (PDPT_ADDR_TO_ENTRY_INDEX(KERNEL_PHYSICAL_START) * PDPT_ENTRY_SIZE)
+
+        movl $high_page_directory_table, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, high_pdpt + (PDPT_ADDR_TO_ENTRY_INDEX(KERNEL_VIRTUAL_START) * PDPT_ENTRY_SIZE)
+
+        mov $0, %ecx
+
+        movl $_kernel_physical_end, %esi
+        shrl $TWO_MEGABYTES_SHIFT, %esi
+        addl $1, %esi
+
+page_directory_table_loop:
+        movl $TWO_MEGABYTES, %eax
+        mul %ecx
+        or $(MMU_PRESENT | MMU_WRITABLE | MMU_PDE_TWO_MB), %eax
+        movl %eax, low_page_directory_table(, %ecx, PAGE_DIRECTORY_ENTRY_SIZE)
+        movl %eax, high_page_directory_table(, %ecx, PAGE_DIRECTORY_ENTRY_SIZE)
+
+        inc %ecx
+        cmp %esi, %ecx
+        jne page_directory_table_loop  // if not equal redo loop
+
+        movl $pml4, %eax
+        movl %eax, %cr3
+
+        movl $KERNEL_CR4, %eax
+        movl %eax, %cr4
+
+        movl $MSR_EFER, %ecx
+        rdmsr
+        or $MSR_EFER_LME, %eax
+        wrmsr
+
+        movl $KERNEL_CR0, %eax
+        movl %eax, %cr0
+
+        lgdt gdt_ptr
+
+        ljmp $(KERNEL_GDT_ENTRY * GDT_ENTRY_SIZE), $_start64
+
+        cli
+        hlt
+
+.code64
+
+.global _start64
+.type _start64, @function
+_start64:
+        // Setup segment selectors
+        movw $0, %ax
+        movw %ax, %ds
+        movw %ax, %es
+        movw %ax, %fs
+        movw %ax, %gs
+        movw %ax, %ss
+
+        call Kernel_Main
+
+        // Should never reach here
+        cli
+        hlt
+1:
+        jmp 1b
+~~~~~~~~~~~~~~~~~~~~~
+
+The first thing in `boot.S` is the multiboot header section `.multiboot`.  This
+is going to be a multiboot 2 header format.  The header starts with the
+multiboot 2 magic number, the architecture, the header length and finally the
+checksum.  After those four variables the multiboot there is a variable number
+of multiboot tags.  We aren't going to put any here except the required end tag
+which has no flags and a size of 8.
+
+Next, we have the bss and data.  For the bss, we declare a bunch of regions of
+memory for the paging data structures.  64-bit paging involves 4 levels of
+paging but we aren't going to use a page table but instead use 2 MB large page
+directory entries.  There is a low and high page directory pointer table (PDPT)
+and page directory table.  The low tables are used for the identity mapping and
+the high tables are going to be used for mapping the same low physical memory to
+a high virtual address.  The `.data` section defines the global descriptor table
+(GDT) which contains two entries.  The first is not used and `GDT_FIRST_ENTRY`
+is defined as 0.  `GDT_KERNEL_ENTRY` is the one we are going to use in the long
+jump to switch to 64-bit mode is defined with the 64-bit mode set, present, ring
+0 privilege level and executable.  Finally, some additional space is added for
+the GDT and `gdt_ptr` is defined.  `gdt_ptr` is a six-byte data structure with
+the first two bytes are the size of the GDT minus one and the last four bytes
+are the physical address of the GDT.  At this point, we have all the memory and
+data structures we need and can start writing the actually boot assembly code.
+
+`_start` is the entry point that grub will jump to (specified in `kernel.ld`).
+The first thing we do is set up %esp to point to the top of the stack declared
+in the bss.
+
+~~~~~~~~~~~~~~~~~~~~~
+        movl $tmp_stack + KERNEL_BOOT_STACK_SIZE, %esp
+~~~~~~~~~~~~~~~~~~~~~
+
+Next we set up two PML4 entries one for `low_pdpt` and one for `high_pdpt`.  We
+load the address of the PDPT into `%eax` and or it so that the present and
+writable bits are set, finally, we move the value of %eax into the corresponding
+PML4 entry.  `PML4_ADDR_TO_ENTRY_INDEX` is a handy macro that shifts a value by
+39 bits and then bitwise-ands it with 0x1FF to basically take an address and
+return the index in the PML4 table for that address.  This is repeated for both
+`low_pdpt` and `high_pdpt`.  The PML4 entries are 8 bytes in size and since we
+are still in 32-bit mode at this point we only set the lower 32 bits in each
+PML4 entry.  This is okay as the top 32 bits are used for high physical
+addresses (which we aren't in), are reserved/ignored or are for the no execution
+bit (bit 63) which we don't need to worry about right now.  This is similar for
+the other tables used for long mode and we will follow the same pattern of only
+settings the first 32 bits and leaving the rest zero.
+
+~~~~~~~~~~~~~~~~~~~~~
+        movl $low_pdpt, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, pml4 + (PML4_ADDR_TO_ENTRY_INDEX(KERNEL_PHYSICAL_START) * PML4_ENTRY_SIZE)
+
+        movl $high_pdpt, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, pml4 + (PML4_ADDR_TO_ENTRY_INDEX(KERNEL_VIRTUAL_START) * PML4_ENTRY_SIZE)
+~~~~~~~~~~~~~~~~~~~~~
+
+Next, a similar pattern is followed for each page directory table.  Note that we
+use a different macro `PDPT_ADDR_TO_ENTRY_INDEX` which shifts by 30 bits instead
+of 39 and we set the entry for the `low_page_directory_table` in the `low_pdpt`
+and the `high_page_directory_table` in the `high_pdpt`.
+
+~~~~~~~~~~~~~~~~~~~~~
+        movl $low_page_directory_table, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, low_pdpt + (PDPT_ADDR_TO_ENTRY_INDEX(KERNEL_PHYSICAL_START) * PDPT_ENTRY_SIZE)
+
+        movl $high_page_directory_table, %eax
+        or $(MMU_PRESENT | MMU_WRITABLE), %eax
+        movl %eax, high_pdpt + (PDPT_ADDR_TO_ENTRY_INDEX(KERNEL_VIRTUAL_START) * PDPT_ENTRY_SIZE)
+~~~~~~~~~~~~~~~~~~~~~
+
+Now that the PML4 and PDPTs are set up the only thing left is to set up the
+entries in the page directory tables.  We are going to loop through to set up a
+number of pages for the kernel based on `_kernel_physical_end` declared in
+`kernel.ld`.  `ecx` is going to contain the current entry being set so it is
+first set to zero and `esi` is going to contain the number of pages we want to
+set so we divide it by two MB by shifting it and then add one to take care of
+any rounding.
+
+~~~~~~~~~~~~~~~~~~~~~
+        mov $0, %ecx
+
+        movl $_kernel_physical_end, %esi
+        shrl $TWO_MEGABYTES_SHIFT, %esi
+        addl $1, %esi
+~~~~~~~~~~~~~~~~~~~~~
+
+Next, the body of the loop is entered.  First, we multiply `eax` by two MB and
+then or it with the present, writable and two MB flags.  Then, we store the value
+of $eax into both the low and high page directory tables offset by `ecx` (our
+counter) times the size of a page directory entry which is eight.
+
+~~~~~~~~~~~~~~~~~~~~~
+page_directory_table_loop:
+        movl $TWO_MEGABYTES, %eax
+        mul %ecx
+        or $(MMU_PRESENT | MMU_WRITABLE | MMU_PDE_TWO_MB), %eax
+        movl %eax, low_page_directory_table(, %ecx, PAGE_DIRECTORY_ENTRY_SIZE)
+        movl %eax, high_page_directory_table(, %ecx, PAGE_DIRECTORY_ENTRY_SIZE)
+~~~~~~~~~~~~~~~~~~~~~
+
+At this point, we've set up the entry for the current loop so we can increment
+`ecx` and compare it to `esi`.  If they are not equal we repeat the body of the
+loop which starts at `page_directory_table_loop`.
+
+~~~~~~~~~~~~~~~~~~~~~
+        inc %ecx
+        cmp %esi, %ecx
+        jne page_directory_table_loop  // if not equal redo loop
+~~~~~~~~~~~~~~~~~~~~~
+
+The final bit in setting up paging for long mode is to move the physical
+address of the PML4 into `cr3`.
+
+~~~~~~~~~~~~~~~~~~~~~
+        movl $pml4, %eax
+        movl %eax, %cr3
+~~~~~~~~~~~~~~~~~~~~~
+
+Now all that's left is to set up some CPU state to transition into long mode.
+Three things need to be done, set up `cr0`, `cr4` and the Extended Feature
+Enable Register (EFER) model-specific register (MSR).  `cr0` is set up with
+bit-0 is set to enable protected mode, bit 4 is set to specify the math
+coprocessor and bit 31 set to enable paging.  For `cr4` the Physical Address
+Extension bit (bit 5) is set.  Finally, the bit 8 in the EFER MSR is the long
+mode bit, so that bit is toggled to one.
+
+~~~~~~~~~~~~~~~~~~~~~
+        movl $KERNEL_CR4, %eax
+        movl %eax, %cr4
+
+        movl $MSR_EFER, %ecx
+        rdmsr
+        or $MSR_EFER_LME, %eax
+        wrmsr
+
+        movl $KERNEL_CR0, %eax
+        movl %eax, %cr0
+~~~~~~~~~~~~~~~~~~~~~
+
+Stick with me here, we are almost done.  The last thing 32-bit code is to set
+the global descriptor table via `lgdt` and then long jump to `_start64` which is
+some 64-bit code located in `boot.S`
+
+~~~~~~~~~~~~~~~~~~~~~
+        lgdt gdt_ptr
+
+        ljmp $(KERNEL_GDT_ENTRY * GDT_ENTRY_SIZE), $_start64
+~~~~~~~~~~~~~~~~~~~~~
+
+In 64-bit code, we set the segment selectors to 0 and then jump to our 64-bit C
+code.
+
+~~~~~~~~~~~~~~~~~~~~~
+.code64
+
+.global _start64
+.type _start64, @function
+_start64:
+        // Setup segment selectors
+        movw $0, %ax
+        movw %ax, %ds
+        movw %ax, %es
+        movw %ax, %fs
+        movw %ax, %gs
+        movw %ax, %ss
+
+        call Kernel_Main
+~~~~~~~~~~~~~~~~~~~~~
+
+# C Code
+
+`Kernel_Main` is located in `kernel.c`.  It's pretty simple and basically just
+going to prove that everything is working in the C code.
+
+~~~~~~~~~~~~~~~~~~~~~
+#define VIDEO_START 0xb8000
+#define VGA_LIGHT_GRAY 7
+
+static void PrintString(char *str)
+{
+  unsigned char *video = ((unsigned char *)VIDEO_START);
+  while(*str != '\0') {
+    *(video++) = *str++;
+    *(video++) = VGA_LIGHT_GRAY;
+  }
+}
+
+void
+Kernel_Main(void)
+{
+  PrintString("Hello World!");
+
+  while(1);
+}
+~~~~~~~~~~~~~~~~~~~~~
+
+We are just going to print the string "Hello World!" to the screen using the VGA
+text mode.  We can still use the address `0xb8000` because we still have low
+memory identity mapped.  One thing we would probably want to do in C is fix
+that, as dereferencing `NULL` right now won't cause a page fault.  Of course, we
+haven't set up the interrupt descriptor table (IDT) yet to handle a page fault
+but that is for another post.
+
+# Running the Kernel
+
+Finally, how can we test all of this?  We are going to use qemu to run an iso
+that we make with our little kernel.  We can use `grub2-mkrescue` to create the
+iso.  First, we need to create a `grub.cfg` which will contain the following:
+
+**grub.cfg:**
+~~~~~~~~~~~~~~~~~~~~~
+set timeout=0
+set default=0
+menuentry "kernel" {
+  multiboot2 /boot/kernel
+}
+~~~~~~~~~~~~~~~~~~~~~
+
+We've specified that the kernel is `/boot/kernel`.  Let's make a directory for
+the iso, copy over the `grub.cfg` and `kernel`, and run `grub2-mkrescue` to
+generate our iso.  Below is a snippet from the `Makefile`:
+
+~~~~~~~~~~~~~~~~~~~~~
+    mkdir -p iso/boot/grub
+    cp grub.cfg iso/boot/grub/
+    cp kernel/kernel iso/boot/
+    grub2-mkrescue -o $(ISO_FILE) iso
+~~~~~~~~~~~~~~~~~~~~~
+
+`ISO_FILE` is defined as `kernel.iso`.  Finally, to run it we can invoke qemu:
+
+~~~~~~~~~~~~~~~~~~~~~
+qemu-system-x86_64 -cdrom $(ISO_FILE) -serial stdio -m 1024M
+~~~~~~~~~~~~~~~~~~~~~
+
+and we should see the following:
+
+![QEMU]({{ site.url }}/assets/x86-64-kernel-boot/qemu.png 'QEMU running the
+ basic kernel showing Hello World!')
+
+# Code
+
+All the code for from this post can be found on github at:
+[https://github.com/missimer/x86-64-kernel-boot](https://github.com/missimer/x86-64-kernel-boot)
+
+# One Final Note
+
+One thing worth mentioning is that it is assumed that this kernel will run on an
+x86 processor that supports long mode.  This can be checked at runtime but isn't
+done in this code for the sake of simplicity.
