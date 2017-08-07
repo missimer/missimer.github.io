@@ -117,7 +117,7 @@ or something like:
     instance in main = 0x35e55010
     Segmentation fault (core dumped)
 
-#What went wrong
+# What went wrong
 
 I'm changing the struct size so the address returned by `malloc` is higher which
 is the key thing that has changed.  So the question is *what happened here?*
@@ -155,7 +155,7 @@ the following:
     instance in main = 0x7f83c47a3010
 
 
-#Looking at some assembly
+# Looking at some assembly
 
 So all good again.  But what exactly is happening when we include the function
 declaration?  Well as the warning states, there is a conversion from an
@@ -205,14 +205,14 @@ If you look at the case where the pointer did not change, the value returned by
 `%rax`.  In the two cases where the pointer changed, bits 32 to 63 are set to
 all 0's or all 1's depending on the value of bit 31.
 
-#Final Thoughts
+# Final Thoughts
 
 So what have we learned.  Well, the obvious is don't ignore warnings, but also
 that something so simple as a C function return value can work sometimes
 fail other times when you ignore them.  The code for this post can be found
 [here](https://github.com/missimer/implicit-int-and-pointers).
 
-#Setting %eax to 0 before the function call
+# Setting %eax to 0 before the function call
 
 The `movl $0, %eax` before the `call` is due to the fact that gcc has assumed
 `alloc_my_struct` takes a variable length number of arguments.  This is again
