@@ -1,7 +1,7 @@
 ---
 layout: post
 title:  "Implicit int and Pointers"
-tags: c
+tags: c compiler-warnings
 ---
 
 So here is an interesting problem related to C that can seem completely
