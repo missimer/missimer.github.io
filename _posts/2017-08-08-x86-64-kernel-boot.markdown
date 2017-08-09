@@ -419,7 +419,7 @@ _start64:
 `Kernel_Main` is located in `kernel.c`.  It's pretty simple and basically just
 going to prove that everything is working in the C code.
 
-~~~~~~~~~~~~~~~~~~~~~
+{% highlight c %}
 #define VIDEO_START 0xb8000
 #define VGA_LIGHT_GRAY 7
 
@@ -439,7 +439,7 @@ Kernel_Main(void)
 
   while(1);
 }
-~~~~~~~~~~~~~~~~~~~~~
+{% endhighlight %}
 
 We are just going to print the string "Hello World!" to the screen using the VGA
 text mode.  We can still use the address `0xb8000` because we still have low
