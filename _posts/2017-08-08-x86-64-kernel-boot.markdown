@@ -490,11 +490,11 @@ $(OBJS): Makefile
 
 ~~~~~~~~~~~~~~~~~~~~~
 
-One final thing worth mentioning, we are using the `gcc` that comes with the
-Linux system we are so I am assuming that the build is occurring on an x86-64
-system.  If this is not the case the build will not work, but most people are
-running 64-bit Linux at this point.  Best practices would be to use an x86-64
-toolchain, but we are skipping that step here for simplicity.
+One final thing with regards to building the kernel, we are using the `gcc` that
+comes with the Linux system we are so I am assuming that the build is occurring
+on an x86-64 system.  If this is not the case the build will not work, but most
+people are running 64-bit Linux at this point.  Best practices would be to use
+an x86-64 toolchain, but we are skipping that step here for simplicity.
 
 # Running the Kernel
 
