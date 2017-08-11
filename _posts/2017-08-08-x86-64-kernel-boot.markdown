@@ -4,6 +4,11 @@ title:  "Booting from Grub2 to x86 long mode (64-bit mode)"
 tags: kernel x86-64 grub2 multiboot
 ---
 
+{: .center}
+![AMD Processor]({{ site.url }}/assets/x86-64-kernel-boot/processor-banner.jpg
+ 'AMD Processor')
+
+
 In this post, I'm going to walk through the process of booting a kernel from grub
 and getting it up into 64 bit C code.  The kernel will be loaded to low physical
 memory by grub and will be mapped to high virtual memory.  This will leave the low
@@ -530,6 +535,7 @@ qemu-system-x86_64 -cdrom $(ISO_FILE) -serial stdio -m 1024M
 
 and we should see the following:
 
+{: .center}
 ![QEMU]({{ site.url }}/assets/x86-64-kernel-boot/qemu.png 'QEMU running the
  basic kernel showing Hello World!')
 

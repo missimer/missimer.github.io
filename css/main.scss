@@ -30,6 +30,11 @@ $on-laptop:        800px;
 #tagcloud { font-size:.9em;  }
 .tags li { display:inline; padding:0 4px; background:#EEE;}
 
+/* To center images */
+.center {
+    text-align: center;
+}
+
 // Using media queries with like this:
 // @include media-query($on-palm) {
 //     .wrapper {
