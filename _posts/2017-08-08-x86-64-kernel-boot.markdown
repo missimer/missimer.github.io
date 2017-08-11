@@ -448,6 +448,54 @@ that, as dereferencing `NULL` right now won't cause a page fault.  Of course, we
 haven't set up the interrupt descriptor table (IDT) yet to handle a page fault
 but that is for another post.
 
+# Building the Kernel
+
+The `Makefile` for the kernel can be found below.  It is pretty self-explanatory
+but there are a few things worth mentioning.  First, we compile with
+`-fno-builtin`, `-nostdinc`, `-nostdlib` and `-ffreestanding` as we do not want
+to build with any of the stuff that comes with the `gcc` that comes with our
+Linux system.  Also, we compile with `-mno-red-zone` because we do not want to
+use the x86-64 bit red zones.  The red zone is a region below the stack that a
+function might use that is not preserved.  For regular user space code this is
+an optimization but for kernel code this can cause issues with interrupts.  We
+don't have interrupts enabled but we will still compile with this flag on.  We
+compile with `-mcmodel=kernel` because we want to generate code for the kernel
+code model where the kernel is running in a high virtual address space.  We also
+specify `-z max-page-size=0x1000` because the default page size is too large and
+grub will not find the multiboot magic number.
+
+~~~~~~~~~~~~~~~~~~~~~
+CC=gcc
+SHARED_FLAGS = -fno-builtin -O2 -nostdinc -nostdlib -ffreestanding -g -Wall -Wextra \
+               -Werror -I. -MMD -mno-red-zone -mcmodel=kernel
+CFLAGS = $(SHARED_FLAGS)
+ASFLAGS = $(SHARED_FLAGS) -Wa,--divide
+
+OBJS := boot.o
+OBJS += kernel.o
+
+DFILES = $(patsubst %.o,%.d,$(OBJS))
+
+all: kernel
+
+kernel: $(OBJS) kernel.ld Makefile
+	$(CC) -z max-page-size=0x1000 $(CFLAGS) -mcmodel=kernel -Wl,--build-id=none -T kernel.ld -o $@ $(OBJS)
+
+clean:
+	find -name "*~" -delete
+	rm -rf $(OBJS) $(DFILES) kernel
+
+$(OBJS): Makefile
+-include $(DFILES)
+
+~~~~~~~~~~~~~~~~~~~~~
+
+One final thing worth mentioning, we are using the `gcc` that comes with the
+Linux system we are so I am assuming that the build is occurring on an x86-64
+system.  If this is not the case the build will not work, but most people are
+running 64-bit Linux at this point.  Best practices would be to use an x86-64
+toolchain, but we are skipping that step here for simplicity.
+
 # Running the Kernel
 
 Finally, how can we test all of this?  We are going to use qemu to run an iso
