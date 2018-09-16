@@ -100,7 +100,11 @@ rounded up to 0x1000.  Finally, `_kernel_virtual_end` and `_kernel_physical_end`
 are defined.  The main take away from this linker script is that `boot.o` is
 identity mapped to low memory and everything else is loaded into low memory but
 has a high virtual address.  Now that the memory layout for our little kernel is
-set up we can move onto the code.
+set up we can move onto the code.[^1]
+
+[^1]: Credit to foxostro on github for pointing out an error previously in the linker script.
+
+# Assembly Code
 
 `boot.S` is a bit of assembly that is going to get us into long mode and into C.
 The fact that we are jumping into C code isn't that relevant and we could easily
@@ -112,8 +116,6 @@ S means the C preprocessor will be run first.  I mention this because it has a
 lot of macros to make it readable, self-documenting and to remove a bunch of
 magic numbers.  I'll put the output of the C preprocessor at the end of this
 post if you just need something quick and dirty that is also self-contained.
-
-# Assembly Code
 
 **boot.S:**
 ~~~~~~~~~~~~~~~~~~~~~
